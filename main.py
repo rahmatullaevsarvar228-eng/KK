@@ -6,6 +6,7 @@
 
 import io
 import json
+import os
 import re
 import time
 from datetime import datetime
@@ -29,7 +30,13 @@ TG_MAX_LEN = 3800  # запас от лимита Telegram в 4096 символ�
 # отдельный постоянно работающий процесс (см. его докстринг); это приложение
 # только читает готовый файл, не опрашивая Telegram само — иначе два процесса
 # начнут конкурировать за одни и те же обновления getUpdates.
-SUBSCRIBERS_FILE = Path(__file__).resolve().parent / "kk_subscribers.json"
+#
+# DATA_DIR — необязательная переменная окружения: где лежат общие файлы
+# (kk_status.json, kk_subscribers.json). Локально не задана — файлы лежат
+# рядом со скриптом, как раньше. На Railway сюда указывают путь к
+# подключённому Volume, чтобы данные не терялись при переразворачивании.
+DATA_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).resolve().parent))
+SUBSCRIBERS_FILE = DATA_DIR / "kk_subscribers.json"
 
 
 BRAND_COLS = [
@@ -703,7 +710,7 @@ defects = df[df["is_defect"]]
 # Срез по городам для интерактивного бота (kk_bot.py) — он читает этот файл
 # при каждом обращении интервьюера, поэтому сохраняем сразу после подсчёта,
 # не дожидаясь, пока аналитик откроет вкладку Telegram.
-KK_STATUS_FILE = Path(__file__).resolve().parent / "kk_status.json"
+KK_STATUS_FILE = DATA_DIR / "kk_status.json"
 try:
     city_list = sorted(df["city"].dropna().unique().tolist(), key=str)
     # сохраняем отчёты сразу на двух языках — бот подставит нужный
@@ -779,6 +786,43 @@ def categorize_reason(r):
         if key in r:
             return label
     return r[:120]
+
+
+# Система раннего предупреждения по интервьюеру — 3 уровня по % брака.
+# Пороги можно менять здесь при необходимости.
+STATUS_LEVELS = [
+    dict(code="RED", emoji="🔴", label="Критическое нарушение",
+         desc="Доля брака ≥ 50%",
+         actions="временно остановить интервьюера; провести проверку его данных; "
+                 "принять решение о замене; при необходимости исключить подозрительные "
+                 "интервью из финальной базы"),
+    dict(code="YELLOW", emoji="🟡", label="Предупреждение",
+         desc="Доля брака от 20% до 50%",
+         actions="уведомить интервьюера; объяснить ошибку; провести дополнительный "
+                 "инструктаж; усилить мониторинг"),
+    dict(code="GREEN", emoji="🟢", label="Нормальная работа",
+         desc="Доля брака < 20%",
+         actions="требования выполняются, существенных нарушений нет"),
+]
+
+
+def classify_status(pct_brak):
+    """Возвращает уровень (dict из STATUS_LEVELS) по % брака интервьюера."""
+    if pct_brak is None:
+        return STATUS_LEVELS[2]
+    if pct_brak >= 50:
+        return STATUS_LEVELS[0]
+    if pct_brak >= 20:
+        return STATUS_LEVELS[1]
+    return STATUS_LEVELS[2]
+
+
+def build_status_legend_df():
+    """Таблица-легенда системы раннего предупреждения (статус/описание/действия)."""
+    return pd.DataFrame([
+        {"Статус": f"{lvl['emoji']} {lvl['code']}", "Описание": lvl["desc"], "Действия": lvl["actions"]}
+        for lvl in STATUS_LEVELS
+    ])
 
 
 tab1, tab_inter, tab2, tab3, tab4 = st.tabs(
@@ -942,7 +986,16 @@ with tab_inter:
             "% упом. Kapitalbank": round(kapital_pct_g, 0) if kapital_pct_g is not None else None,
         })
     inter_df = pd.DataFrame(rows).sort_values("Интервьюер", key=lambda s: s.astype(str)).reset_index(drop=True)
+    inter_df.insert(3, "Статус", inter_df["% брака"].apply(
+        lambda p: f"{classify_status(p)['emoji']} {classify_status(p)['code']}"
+    ))
     st.dataframe(inter_df, use_container_width=True, hide_index=True)
+
+    st.subheader("Система раннего предупреждения (статус интервьюера)")
+    st.dataframe(build_status_legend_df(), use_container_width=True, hide_index=True)
+    st.caption(f"🔴 Критическое: {int((inter_df['Статус'].str.contains('RED')).sum())} · "
+               f"🟡 Предупреждение: {int((inter_df['Статус'].str.contains('YELLOW')).sum())} · "
+               f"🟢 Норма: {int((inter_df['Статус'].str.contains('GREEN')).sum())}")
 
 with tab2:
     st.subheader(f"Анкеты с браком ({len(defects)})")
@@ -964,6 +1017,24 @@ with tab2:
         for i, col in enumerate(export_df.columns, start=1):
             width = min(60, max(12, int(export_df[col].astype(str).str.len().max() or 12) + 2))
             ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = width
+
+        # Второй лист: статус интервьюеров (🔴🟡🟢) + легенда системы раннего предупреждения
+        status_df = inter_df.drop(columns=["Ср. банков (ToM)", "Ср. приложений (ToM)", "Ср. кредит (ToM)",
+                                             "Ср. вклад (ToM)", "Ср. реклама (ToM)", "Ср. карты (ToM)",
+                                             "Ср. аидед-знание (из 12)", "% знание Uzum", "% упом. Kapitalbank"])
+        status_df.to_excel(writer, index=False, sheet_name="Статус интервьюеров", startrow=0)
+        legend_df = build_status_legend_df()
+        legend_start = len(status_df) + 3
+        pd.DataFrame([["Система раннего предупреждения (статус интервьюера)"]]).to_excel(
+            writer, index=False, header=False, sheet_name="Статус интервьюеров", startrow=legend_start
+        )
+        legend_df.to_excel(writer, index=False, sheet_name="Статус интервьюеров", startrow=legend_start + 1)
+        ws2 = writer.sheets["Статус интервьюеров"]
+        for i, col in enumerate(status_df.columns, start=1):
+            width = min(60, max(12, int(status_df[col].astype(str).str.len().max() or 12) + 2))
+            ws2.column_dimensions[ws2.cell(row=1, column=i).column_letter].width = width
+        ws2.column_dimensions["B"].width = 40
+        ws2.column_dimensions["C"].width = 70
     st.download_button(
         "⬇️ Скачать брак (Excel)",
         xlsx_buf.getvalue(),
