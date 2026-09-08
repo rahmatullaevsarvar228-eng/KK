@@ -99,10 +99,19 @@ def _find_block_cols(raw, anchor, width):
 # бренды вроде "Xazna"/"Gazna" (это настоящий банк, не "не знаю").
 INVALID_TOM_ANSWERS = {
     "999", "99", "0",
-    "bilmayman", "bilmiyman", "bilmadim",
     "не знаю", "незнаю", "н е знаю", "нет знаю",
-    "нет", "yoq", "йук",
+    "нет", "yoq", "йук", "не помню",
 }
+# Отдельные подстроки для семейства "больше не знаю/не знает" — у этих ответов
+# слишком много опечаток и вариантов написания (bilmaydi/bilmayman/bilmadim,
+# boshqa bilmaydu/bilmaysi/bilmaudi/bilmayfi и т.д.), чтобы перечислить точными
+# строками. Ни одно реальное название банка эти подстроки не задевает
+# (проверено отдельно), поэтому ищем как вхождение, а не точное совпадение.
+# "курмаган"/"kurmagan"/"ko'rmagan" — узбекское "не видел(а)", актуально для
+# блока про рекламу ("какую рекламу видели" → "не видел" — легитимный ответ).
+INVALID_TOM_SUBSTRINGS = ("билма", "bilma", "незна", "не знае", "не знат", "бильма",
+                           "курмаган", "kurmagan", "ko'rmagan", "kormagan", "kо'rmagan", "koʻrmagan",
+                           "не знаю", "не знают")
 
 
 def _is_valid_tom_answer(v):
@@ -110,6 +119,8 @@ def _is_valid_tom_answer(v):
         return False
     s = str(v).strip().lower()
     if s == "" or s in INVALID_TOM_ANSWERS:
+        return False
+    if any(p in s for p in INVALID_TOM_SUBSTRINGS):
         return False
     return True
 
@@ -125,34 +136,168 @@ def _count_filled(raw, cols):
     return filled.sum(axis=1)
 
 
+# Список известных банков/приложений для проверки "непохожих ни на что"
+# ответов — берём чистые имена из BANK_VARIANTS (без суффиксов .1/.2/.3 и
+# приставки "Приложение ") + частые платёжные приложения, которых нет в
+# банковском списке (они реальные, просто не нужны для аидед-знания).
+# ВАЖНО: определяется НИЖЕ, сразу после BANK_VARIANTS/BANK_DISPLAY —
+# им нужен уже готовый BANK_VARIANTS.
+
+
 # Аидед-список знания банков (12 банков, "Знаю"/"Не знаю"). У каждого банка
 # в выгрузке несколько дублирующихся колонок (рандомизация порядка показа —
 # 3-4 варианта на банк), плюс у части банков 4-й вариант назван иначе
 # ("Приложение X" вместо просто "X"). Перечислено по фактическому составу
 # колонок в этой выгрузке.
+# Аидед-список знания банков. У каждого банка в выгрузке несколько
+# дублирующихся колонок (рандомизация порядка показа — 3-4 варианта на
+# банк). Пилотная волна добавила ещё 8 банков (включая Kapitalbank — раньше
+# его в аидед-списке не было) и местами по-другому назвала 4-й вариант
+# колонки — храним варианты из ОБЕИХ волн сразу (лишние просто не найдутся
+# в конкретном файле и тихо игнорируются, см. _coalesce_bank_value).
 BANK_VARIANTS = {
-    "xazna": ["XAZNA", "XAZNA.1", "XAZNA.2", "Приложение XAZNA"],
-    "payme": ["Payme", "Payme.1", "Payme.2", "Приложение Payme"],
+    "xazna": ["XAZNA", "XAZNA.1", "XAZNA.2", "XAZNA.3", "Приложение XAZNA"],
+    "payme": ["Payme", "Payme.1", "Payme.2", "Payme.3", "Приложение Payme"],
     "tbcbank": ["TBC bank", "TBC bank.1", "TBC bank.2", "TBC bank.3"],
     "agrobank": ["Agrobank", "Agrobank.1", "Agrobank.2", "Agrobank.3"],
     "hamkorbank": ["Hamkor bank", "Hamkor bank.1", "Hamkor bank.2", "Hamkor bank.3"],
     "ipotekabank": ["Ipoteka bank", "Ipoteka bank.1", "Ipoteka bank.2", "Ipoteka bank.3"],
-    "paynet": ["Paynet", "Paynet.1", "Paynet.2", "Приложение Paynet"],
+    "paynet": ["Paynet", "Paynet.1", "Paynet.2", "Paynet.3", "Приложение Paynet"],
     "uzumbank": ["Uzum Bank", "Uzum Bank.1", "Uzum Bank.2", "Uzum Bank.3"],
     "xalqbanki": ["Xalq banki", "Xalq banki.1", "Xalq banki.2", "Xalq banki.3"],
-    "nbu": ["NBU / Milliy bank", "NBU / Milliy bank.1", "NBU / Milliy bank.2", "NBU / Milliy bank.3"],
+    "nbu": ["NBU / Milliy bank", "NBU / Milliy bank.1", "NBU / Milliy bank.2",
+            "NBU / Milliy bank.3", "NBU (Milliy bank)"],
     "anorbank": ["Anor bank", "Anor bank.1", "Anor bank.2", "Anor bank.3"],
-    "click": ["Click", "Click.1", "Click.2", "Приложение Click"],
+    "click": ["Click", "Click.1", "Click.2", "Click.3", "Приложение Click"],
+    # ── новые банки пилотной волны ──────────────────────────────────────
+    "kapitalbank": ["Kapitalbank", "Kapitalbank.1", "Kapitalbank.2", "Kapitalbank.3"],
+    "infinbank": ["Infin bank", "Infin bank.1", "Infin bank.2", "Infin bank.3"],
+    "sqb": ["SQB / Sanoatqurilishbank", "SQB / Sanoatqurilishbank.1",
+            "SQB / Sanoatqurilishbank.2", "SQB / Sanoatqurilishbank.3"],
+    "asakabank": ["Asakabank", "Asakabank.1", "Asakabank.2", "Asakabank.3"],
+    "aloqabank": ["Aloqa bank", "Aloqa bank.1", "Aloqa bank.2", "Aloqa bank.3"],
+    "mikrokreditbank": ["Mikrokreditbank", "Mikrokreditbank.1", "Mikrokreditbank.2", "Mikrokreditbank.3"],
+    "turonbank": ["Turon bank", "Turon bank.1", "Turon bank.2", "Turon bank.3"],
+    "ipakyolibank": ["Ipak yo'li bank", "Ipak yo'li bank.1", "Ipak yo'li bank.2", "Ipak yo'li bank.3"],
 }
 BANK_DISPLAY = {
     "xazna": "XAZNA (Halq Bank)", "payme": "Payme", "tbcbank": "TBC Bank",
     "agrobank": "Agrobank", "hamkorbank": "Hamkor Bank", "ipotekabank": "Ipoteka Bank",
     "paynet": "Paynet", "uzumbank": "Uzum Bank", "xalqbanki": "Xalq Banki",
     "nbu": "NBU", "anorbank": "Anor Bank", "click": "Click",
+    "kapitalbank": "Kapitalbank", "infinbank": "Infin Bank", "sqb": "SQB",
+    "asakabank": "Asakabank", "aloqabank": "Aloqa Bank",
+    "mikrokreditbank": "Mikrokreditbank", "turonbank": "Turon Bank",
+    "ipakyolibank": "Ipak Yo'li Bank",
 }
-# В этой волне Kapitalbank НЕ входит в аидед-список (список выше — это то,
-# что реально есть в выгрузке), поэтому его знание можно оценить только по
-# спонтанным (Top-of-Mind) упоминаниям — см. _kapital_mentioned ниже.
+
+
+def _build_known_names():
+    names = set()
+    for variants in BANK_VARIANTS.values():
+        for v in variants:
+            base = re.sub(r"\.\d+$", "", v).replace("Приложение ", "").strip().lower()
+            names.add(base)
+    names |= {
+        "apelsin", "uzcard", "humo", "multicard", "beepul", "upay", "oson",
+        "davr bank", "trast bank", "avo", "ipak yoli", "ipak yo'li", "alif",
+    }
+    # Кириллические варианты написания тех же банков — интервьюеры чаще
+    # пишут кириллицей, чем латиницей, поэтому без этого список выше почти
+    # бесполезен (см. проверку на реальном файле — было полно ложных
+    # "необычных" ответов вида "Узум банк", "Тбс", "Халк банк" и т.п.,
+    # которые на самом деле совершенно нормальные названия банков).
+    names |= {
+        "узум", "узум банк", "узумбанк", "uzum",
+        "тбс", "тбс банк", "тбсбанк", "твс", "tbs",
+        "халк", "халк банк", "халкбанк", "халык банк",
+        "клик",
+        "анор", "анор банк", "анорбанк",
+        "ипотека", "ипотека банк", "ипотекабанк", "ипотика", "ипотика банк",
+        "миллий банк", "миллийбанк", "milliy",
+        "капитал", "капиталбанк", "капитал банк",
+        "хазна",
+        "пайми",
+        "асака", "асакабанк",
+        "пайнет",
+        "агробанк", "агро",
+        "хамкорбанк", "хамкор банк", "хамкор", "hamkor",
+        "инфин банк", "инфин",
+        "ипак ёли", "ипак йули банк", "ipak",
+        "алокабанк",
+        "микрокредит банк",
+        "турон банк",
+        "sqb", "tbc", "anor", "xalq", "agro", "turon", "aloqa", "klik",
+        "милли банк", "milliy bank", "саноаткурилиш банк",
+    }
+    return names
+
+
+KNOWN_TOM_NAMES = _build_known_names()
+
+
+def find_unusual_tom_answers(raw, max_items=60):
+    """Собирает ответы в ToM-блоках, которые ЗАСЧИТАНЫ как названный
+    банк/приложение (прошли _is_valid_tom_answer), но не похожи ни на один
+    известный банк/приложение (см. KNOWN_TOM_NAMES) — кандидаты на новый,
+    ещё не пойманный вариант "не знаю" ИЛИ на реальный бренд, которого нет
+    в списке. Не решает автоматически — просто выносит на ручную проверку,
+    вместо того чтобы молча посчитать (или молча отбросить) непредсказуемый
+    свободный текст интервьюера."""
+    from difflib import get_close_matches
+    from collections import Counter
+
+    counter = Counter()
+    for block in TOM_BLOCKS:
+        cols = _find_block_cols(raw, block["anchor"], block["width"])
+        for col in cols:
+            if col not in raw.columns:
+                continue
+            for v in raw[col].dropna():
+                if not _is_valid_tom_answer(v):
+                    continue
+                s = str(v).strip().lower()
+                if get_close_matches(s, KNOWN_TOM_NAMES, n=1, cutoff=0.72):
+                    continue  # достаточно похоже на известное имя — пропускаем
+                counter[str(v).strip()] += 1
+    return counter.most_common(max_items)
+
+
+def collect_all_tom_answers(raw):
+    """ПОЛНЫЙ список абсолютно ВСЕХ уникальных ответов, которые встретились
+    в ToM-блоках (без фильтрации по 'похожести' на известные банки) — вместе
+    с текущим статусом (считается сейчас названным банком или отсекается как
+    'не знаю') и количеством раз, сколько ответ встретился. Ничего не
+    решает и не предполагает — просто показывает 100% сырых данных для
+    ручной проверки, чтобы не гадать, что могли написать интервьюеры."""
+    from collections import Counter
+
+    counter = Counter()
+    for block in TOM_BLOCKS:
+        cols = _find_block_cols(raw, block["anchor"], block["width"])
+        for col in cols:
+            if col not in raw.columns:
+                continue
+            for v in raw[col].dropna():
+                s = str(v).strip()
+                if s == "":
+                    continue
+                counter[s] += 1
+
+    rows = []
+    for answer, cnt in counter.most_common():
+        rows.append({
+            "Ответ (как есть в файле)": answer,
+            "Сколько раз встретился": cnt,
+            "Сейчас считается банком?": "✅ Да" if _is_valid_tom_answer(answer) else "❌ Нет (не знаю)",
+        })
+    return pd.DataFrame(rows)
+
+
+# Как запасной вариант (для файлов волны, где Kapitalbank НЕ входит в
+# аидед-список) — оцениваем его по спонтанным (Top-of-Mind) упоминаниям.
+# Если "kapitalbank" есть в BANK_VARIANTS с реальными колонками в файле —
+# основной метрикой станет аидед-знание, а это — просто доп. справка.
 KAPITAL_PATTERNS = ("kapital", "капитал")
 
 
@@ -245,7 +390,9 @@ def load_data(file_bytes):
     # квотного номера из тестовых отправок формы) — приводим к строке сразу,
     # иначе дальнейшие sort/groupby падают на смеси int и str в одной колонке.
     df["city"] = df["city"].apply(lambda v: str(v).strip() if pd.notna(v) else v)
-    df["inter"] = raw.get("Inter")
+    # "Код интервьюера" — как в пилотной волне; "Inter" — как в прошлой волне.
+    # Поддерживаем оба, чтобы main.py работал с обоими форматами файла.
+    df["inter"] = raw.get("Код интервьюера", raw.get("Inter"))
     # Как и "Город" — иногда в код интервьюера попадают числовые обрывки из
     # тестовых отправок формы (например, "26" вместо "Inter 26"). Приводим
     # к строке сразу, иначе sort/groupby падают на смеси int и str.
@@ -286,14 +433,38 @@ def load_data(file_bytes):
     # т.к. отдельного аидед-вопроса про Kapitalbank в этой анкете нет
     tom_bank_cols = _find_block_cols(raw, "первым приходит", TOM_BLOCKS[0]["width"])
     df["kapital_mentioned"] = _kapital_mentioned(raw, tom_bank_cols)
+    # Есть ли в ЭТОМ файле реальные аидед-колонки по Kapitalbank? В прошлой
+    # волне их не было (только спонтанные упоминания), в пилотной — есть.
+    # Флаг записываем в каждую строку, чтобы UI мог понять, какую метрику
+    # показывать, не трогая raw напрямую.
+    df["kapitalbank_aided_available"] = any(v in raw.columns for v in BANK_VARIANTS["kapitalbank"])
 
-    # --- Аидед-список знания банков (12 банков, "Знаю"/"Не знаю") ----------
+    # --- Аидед-список знания банков (кол-во банков зависит от волны — см.
+    # n_aided_banks_available ниже, было 12, в пилотной волне их больше) ---
     known, awareness_answered = build_awareness_matrix(raw)
     df["awareness_answered"] = awareness_answered
     df["aided_known_count"] = known.sum(axis=1).where(awareness_answered)
     for key in BANK_VARIANTS:
         df[f"know_{key}"] = known[key]
     df["awareness_fatigue"] = detect_awareness_fatigue(raw, known)
+    df["n_aided_banks_available"] = sum(
+        1 for key in BANK_VARIANTS if any(v in raw.columns for v in BANK_VARIANTS[key])
+    )
+    df["available_bank_keys"] = ",".join(
+        key for key in BANK_VARIANTS if any(v in raw.columns for v in BANK_VARIANTS[key])
+    )
+
+    # "Непохожие ни на что" ответы в ToM-блоках — для ручной проверки (см.
+    # find_unusual_tom_answers). Сохраняем как JSON-строку, повторённую на
+    # каждую строку — тот же приём, что и available_bank_keys выше.
+    df["unusual_tom_answers_json"] = json.dumps(
+        find_unusual_tom_answers(raw), ensure_ascii=False
+    )
+
+    # ПОЛНЫЙ список всех уникальных ответов в ToM-блоках, без фильтрации по
+    # похожести — 100%-ное покрытие для ручной проверки (см. запрос
+    # пользователя: "хочу видеть вообще всё, что написали интеры").
+    df["all_tom_answers_json"] = collect_all_tom_answers(raw).to_json(orient="records", force_ascii=False)
 
     return df
 
@@ -856,6 +1027,46 @@ with tab1:
     else:
         st.success("Предупреждений не найдено.")
 
+    st.subheader("🔍 Необычные ответы в ToM-блоках (проверьте вручную)")
+    st.caption(
+        "Автоматика не может предугадать всё, что напишет интервьюер. Поэтому вместо "
+        "бесконечного добавления новых фраз в фильтр — вот все ответы, которые СЧИТАЮТСЯ "
+        "названным банком/приложением, но не похожи ни на один известный бренд. Обычно это "
+        "либо новый вариант «не знаю», который ещё не пойман фильтром, либо реальный бренд, "
+        "которого просто нет в списке — тогда его стоит туда добавить."
+    )
+    unusual = json.loads(df["unusual_tom_answers_json"].iloc[0]) if len(df) else []
+    if unusual:
+        unusual_df = pd.DataFrame(unusual, columns=["Ответ (как есть в файле)", "Сколько раз встретился"])
+        st.dataframe(unusual_df, use_container_width=True, hide_index=True)
+    else:
+        st.success("Все засчитанные ответы похожи на известные банки/приложения — ничего необычного не найдено.")
+
+    with st.expander("📋 Показать АБСОЛЮТНО ВСЕ ответы в ToM-блоках (100% — без фильтрации)"):
+        st.caption(
+            "Полный список каждого уникального текста, который встретился в блоках "
+            "Top-of-Mind, со статусом — считается сейчас названным банком или нет. "
+            "Ничего не выбрано и не пропущено — это все данные, какие есть."
+        )
+        all_answers_df = pd.read_json(io.StringIO(df["all_tom_answers_json"].iloc[0])) if len(df) else pd.DataFrame()
+        if not all_answers_df.empty:
+            search = st.text_input("🔎 Поиск по тексту ответа (необязательно)", "")
+            shown_df = all_answers_df
+            if search:
+                shown_df = all_answers_df[
+                    all_answers_df["Ответ (как есть в файле)"].str.contains(search, case=False, na=False)
+                ]
+            st.caption(f"Показано {len(shown_df)} из {len(all_answers_df)} уникальных ответов.")
+            st.dataframe(shown_df, use_container_width=True, hide_index=True, height=400)
+
+            csv_all = all_answers_df.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                "⬇️ Скачать полный список (CSV, для Excel)",
+                csv_all, "vse_otvety_tom.csv", "text/csv",
+            )
+        else:
+            st.info("Нет данных.")
+
     st.subheader("Ключевые метрики по волне")
     metrics_rows = []
     metrics_rows.append(("Медиана длительности анкеты, мин", f"{df['duration_min'].median():.1f}"))
@@ -885,7 +1096,8 @@ with tab1:
                           f"{tom_deposit_n.median():.0f}" if len(tom_deposit_n) else "н/д"))
 
     aided = df.loc[df["awareness_answered"], "aided_known_count"]
-    metrics_rows.append(("Ср. кол-во банков, которых знает (аидед-список, из 12)",
+    n_banks_total = int(df["n_aided_banks_available"].iloc[0]) if len(df) else 0
+    metrics_rows.append((f"Ср. кол-во банков, которых знает (аидед-список, из {n_banks_total})",
                           f"{aided.mean():.2f}" if len(aided) else "н/д"))
 
     aware_base = df[df["awareness_answered"]]
@@ -893,23 +1105,33 @@ with tab1:
     metrics_rows.append(("% знание Uzum Bank (аидед-список)",
                           f"{uzum_pct:.0f}%" if uzum_pct is not None else "н/д"))
 
+    kapital_aided_available = bool(df["kapitalbank_aided_available"].iloc[0]) if len(df) else False
+    if kapital_aided_available:
+        kapital_aided_pct = aware_base["know_kapitalbank"].mean() * 100 if len(aware_base) else None
+        metrics_rows.append(("% знание Kapitalbank (аидед-список)",
+                              f"{kapital_aided_pct:.0f}%" if kapital_aided_pct is not None else "н/д"))
+
     kapital_base = df[df["completed"]]
     kapital_pct = kapital_base["kapital_mentioned"].mean() * 100 if len(kapital_base) else None
-    metrics_rows.append(("% упоминаний Kapitalbank (спонтанно — аидед-варианта в этой анкете нет)",
-                          f"{kapital_pct:.0f}%" if kapital_pct is not None else "н/д"))
+    kapital_spont_label = ("% упоминаний Kapitalbank (спонтанно, справочно)" if kapital_aided_available
+                            else "% упоминаний Kapitalbank (спонтанно — аидед-варианта в этой анкете нет)")
+    metrics_rows.append((kapital_spont_label, f"{kapital_pct:.0f}%" if kapital_pct is not None else "н/д"))
 
     metrics_df = pd.DataFrame(metrics_rows, columns=["Метрика", "Значение"])
     st.dataframe(metrics_df, use_container_width=True, hide_index=True)
 
-    st.subheader("Знание банков по волне (аидед-список, % «Знаю»)")
+    st.subheader(f"Знание банков по волне (аидед-список — {n_banks_total} банков, % «Знаю»)")
     if df["awareness_answered"].sum():
+        available_keys = df["available_bank_keys"].iloc[0].split(",") if len(df) else []
         aw_rows = [(BANK_DISPLAY[key], df.loc[df["awareness_answered"], f"know_{key}"].mean() * 100)
-                   for key in BANK_VARIANTS]
+                   for key in available_keys if key]
         aw_df = pd.DataFrame(aw_rows, columns=["Банк", "% Знаю"]).sort_values("% Знаю", ascending=False)
         aw_df["% Знаю"] = aw_df["% Знаю"].round(0).astype(int).astype(str) + "%"
         st.dataframe(aw_df, use_container_width=True, hide_index=True)
-        st.caption(f"База: {int(df['awareness_answered'].sum())} респондентов, дошедших до блока знания банков "
-                   f"(Kapitalbank в этот список не входит — см. метрику выше).")
+        kapital_note = ("" if kapital_aided_available else
+                         " Kapitalbank в аидед-список этой волны не входит — см. спонтанную метрику выше.")
+        st.caption(f"База: {int(df['awareness_answered'].sum())} респондентов, дошедших до блока знания банков."
+                   f"{kapital_note}")
     else:
         st.info("Нет респондентов, дошедших до блока знания банков.")
 
